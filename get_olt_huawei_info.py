@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Script untuk mengambil data OLT Huawei MA5800 via SNMP
-Mengambil 3 metrik: Board Used, PON Port Used, Home Connect
+Mengambil 5 metrik: Board Used, PON Port Installed/Used, ONT Installed/Online
 """
 
 import pandas as pd
@@ -25,8 +25,8 @@ OID_IF_OPER_STATUS = "1.3.6.1.2.1.2.2.1.8"
 OID_HW_BOARD_OPER_STATUS = "1.3.6.1.4.1.2011.6.3.3.2.1.7"
 OID_HW_ONT_RUN_STATUS = "1.3.6.1.4.1.2011.6.128.1.1.2.46.1.15"
 
-output_dir = Path("output")
-output_dir.mkdir(exist_ok=True)
+output_dir = Path("output") / datetime.now().strftime("%Y-%m-%d")
+output_dir.mkdir(parents=True, exist_ok=True)
 
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 log_file = output_dir / f"olt_snmp_{timestamp}.log"
@@ -129,64 +129,89 @@ def get_board_status(ip):
         
         if oper_output:
             oper_status = parse_snmp_output(oper_output, full_index=False)
+            
+            # Hitung installed (semua board yang ada, termasuk offline)
+            # Status: 0=normal, 1=fault, 2=offline
+            # Installed = yang bukan empty/not-present
+            installed = len(oper_status)
+            
+            # Hitung used (hanya yang status normal/active)
             used = sum(1 for status in oper_status.values() if status == "0")
             
-            if used > 0:
-                logging.info(f"{ip}: Found {used} active boards")
-                return {"used": used}
+            if installed > 0:
+                logging.info(f"{ip}: Found {installed} installed boards, {used} active")
+                return {"installed": installed, "used": used}
         
         logging.warning(f"{ip}: Could not get board count")
-        return {"used": 0}
+        return {"installed": 0, "used": 0}
         
     except Exception as e:
         logging.error(f"Error getting board status for {ip}: {str(e)}")
-        return {"used": 0}
+        return {"installed": 0, "used": 0}
 
 
 def get_pon_port_status(ip):
+    """
+    Mengambil status PON port
+    Returns: dict dengan 'installed' (total PON port) dan 'used' (PON port yang UP)
+    """
     try:
         type_output = run_snmp_command(ip, OID_IF_TYPE)
         oper_output = run_snmp_command(ip, OID_IF_OPER_STATUS)
         
         if not type_output or not oper_output:
             logging.warning(f"{ip}: Could not get interface data")
-            return {"used": 0}
+            return {"installed": 0, "used": 0}
         
         types = parse_snmp_output(type_output, full_index=False)
         oper_status = parse_snmp_output(oper_output, full_index=False)
         
+        installed = 0
         used = 0
-        total = 0
         
         for idx in types:
+            # ifType 250 = GPON port
             if types[idx] == "250":
-                total += 1
+                installed += 1
+                # operStatus 1 = UP
                 if oper_status.get(idx) == "1":
                     used += 1
         
-        logging.info(f"{ip}: Found {total} PON ports, {used} UP")
-        return {"used": used}
+        logging.info(f"{ip}: Found {installed} PON ports installed, {used} UP")
+        return {"installed": installed, "used": used}
         
     except Exception as e:
         logging.error(f"Error getting PON port status for {ip}: {str(e)}")
-        return {"used": 0}
+        return {"installed": 0, "used": 0}
 
 
-def get_ont_online_count(ip):
+def get_ont_status(ip):
+    """
+    Mengambil status ONT
+    Returns: dict dengan 'installed' (total ONT terdaftar) dan 'online' (ONT yang online)
+    ONT Run Status: 0=offline, 1=online
+    """
     try:
         ont_output = run_snmp_command(ip, OID_HW_ONT_RUN_STATUS)
         
         if not ont_output:
-            return 0
+            logging.warning(f"{ip}: Could not get ONT data")
+            return {"installed": 0, "online": 0}
         
         statuses = parse_snmp_output(ont_output, full_index=True)
+        
+        # Total ONT yang terdaftar (installed)
+        installed = len(statuses)
+        
+        # ONT yang online (status = 1)
         online = sum(1 for status in statuses.values() if status == "1")
         
-        return online
+        logging.info(f"{ip}: Found {installed} ONT installed, {online} online")
+        return {"installed": installed, "online": online}
         
     except Exception as e:
-        logging.error(f"Error getting ONT count for {ip}: {str(e)}")
-        return 0
+        logging.error(f"Error getting ONT status for {ip}: {str(e)}")
+        return {"installed": 0, "online": 0}
 
 
 def collect_olt_data(ip):
@@ -196,9 +221,12 @@ def collect_olt_data(ip):
         "ip": ip,
         "sysname": "",
         "model": "",
+        "board_installed": 0,
         "board_used": 0,
+        "pon_port_installed": 0,
         "pon_port_used": 0,
-        "home_connect": 0,
+        "ont_installed": 0,
+        "ont_online": 0,
         "status": "error",
         "error": ""
     }
@@ -212,12 +240,21 @@ def collect_olt_data(ip):
         
         result["sysname"] = get_olt_sysname(ip)
         result["model"] = get_olt_model(ip)
-        result["board_used"] = get_board_status(ip)["used"]
-        result["pon_port_used"] = get_pon_port_status(ip)["used"]
-        result["home_connect"] = get_ont_online_count(ip)
+        
+        board_status = get_board_status(ip)
+        result["board_installed"] = board_status["installed"]
+        result["board_used"] = board_status["used"]
+        
+        pon_status = get_pon_port_status(ip)
+        result["pon_port_installed"] = pon_status["installed"]
+        result["pon_port_used"] = pon_status["used"]
+        
+        ont_status = get_ont_status(ip)
+        result["ont_installed"] = ont_status["installed"]
+        result["ont_online"] = ont_status["online"]
         
         result["status"] = "OK"
-        logging.info(f"{ip}: OK - {result['sysname']} | Board: {result['board_used']} | PON: {result['pon_port_used']} | ONT: {result['home_connect']}")
+        logging.info(f"{ip}: OK - {result['sysname']} | Board: {result['board_used']}/{result['board_installed']} | PON: {result['pon_port_used']}/{result['pon_port_installed']} | ONT: {result['ont_online']}/{result['ont_installed']}")
         
     except Exception as e:
         result["error"] = str(e)
@@ -229,13 +266,16 @@ def collect_olt_data(ip):
 def main():
     print("=" * 70)
     print("Script SNMP OLT Huawei MA5800")
-    print("Monitoring: Board Used, PON Port Used, Home Connect")
+    print("Monitoring: Board, PON Port, ONT (Installed/Used/Online)")
     print("=" * 70)
     
-    input_file = input("Masukkan nama file text input (contoh: ip_list.txt): ").strip()
+    # File input yang tetap
+    input_file = Path("olt.txt")
     
-    if not Path(input_file).exists():
+    if not input_file.exists():
         print(f"Error: File '{input_file}' tidak ditemukan!")
+        print(f"Silakan buat file 'olt.txt' di folder yang sama dengan script ini.")
+        print(f"Format: satu IP per baris")
         return
     
     try:
@@ -284,9 +324,12 @@ def main():
     
     total = len(results)
     success = len([r for r in results if r['status'] == 'OK'])
-    total_board = sum([r.get('board_used', 0) for r in results if r['status'] == 'OK'])
-    total_pon = sum([r.get('pon_port_used', 0) for r in results if r['status'] == 'OK'])
-    total_ont = sum([r.get('home_connect', 0) for r in results if r['status'] == 'OK'])
+    total_board_installed = sum([r.get('board_installed', 0) for r in results if r['status'] == 'OK'])
+    total_board_used = sum([r.get('board_used', 0) for r in results if r['status'] == 'OK'])
+    total_pon_installed = sum([r.get('pon_port_installed', 0) for r in results if r['status'] == 'OK'])
+    total_pon_used = sum([r.get('pon_port_used', 0) for r in results if r['status'] == 'OK'])
+    total_ont_installed = sum([r.get('ont_installed', 0) for r in results if r['status'] == 'OK'])
+    total_ont_online = sum([r.get('ont_online', 0) for r in results if r['status'] == 'OK'])
     
     print(f"\n{'=' * 70}")
     print(f"SUMMARY")
@@ -295,13 +338,16 @@ def main():
     print(f"Success: {success}")
     print(f"Failed: {total - success}")
     print(f"{'-' * 70}")
-    print(f"Board Used: {total_board}")
-    print(f"PON Port Used: {total_pon}")
-    print(f"Home Connect: {total_ont}")
+    print(f"Board Installed: {total_board_installed}")
+    print(f"Board Used: {total_board_used}")
+    print(f"PON Port Installed: {total_pon_installed}")
+    print(f"PON Port Used: {total_pon_used}")
+    print(f"ONT Installed: {total_ont_installed}")
+    print(f"ONT Online: {total_ont_online}")
     print(f"{'=' * 70}\n")
     
     logging.info(f"Selesai. Success: {success}/{total}")
-    logging.info(f"Total - Board: {total_board}, PON: {total_pon}, ONT: {total_ont}")
+    logging.info(f"Total - Board: {total_board_used}/{total_board_installed}, PON: {total_pon_used}/{total_pon_installed}, ONT: {total_ont_online}/{total_ont_installed}")
 
 
 if __name__ == "__main__":
