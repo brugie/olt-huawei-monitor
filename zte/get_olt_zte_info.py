@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import logging
 
-SNMP_COMMUNITY = "mwifo123"
+SNMP_COMMUNITY = "public"
 SNMP_VERSION = "2c"
 SNMP_TIMEOUT = 30
 MAX_WORKERS = 5
