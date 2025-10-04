@@ -3,7 +3,6 @@
 """
 Script untuk mengambil data OLT Huawei MA5800 via SNMP
 Mengambil 5 metrik: Board, PON Port, ONT (Installed/Used/Online)
-Author: antoso
 """
 
 import pandas as pd
